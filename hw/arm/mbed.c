@@ -331,19 +331,44 @@ static void mbed_timer_reset(MBEDTimerInfo *s)
 	s->tick = 0;
 }
 
-static int mbed_timer_init(SysBusDevice *dev)
+static const MemoryRegionOps mbed_timer_ops = {
+    .read_with_attrs = timer_read,
+    .write_with_attrs = timer_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    .impl.min_access_size = 1, // ???
+    .impl.max_access_size = 4, // ???
+    .valid.min_access_size = 1, // ???
+    .valid.max_access_size = 4, // ???
+};
+
+
+static void mbed_timer_class_init(ObjectClass *klass, void *data)
 {
-	int iomemtype;
-	MBEDTimerInfo *s = MBED_TIMER(dev);
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->desc = "MBED timer";
+    dc->reset = mbed_timer_reset;
+    dc->vmsd = &vmstate_strongarm_uart_regs; // ???
+    dc->props = strongarm_uart_properties; // ???
+    dc->realize = strongarm_uart_realize; // ???
+}
+
+static int mbed_timer_initfn(Object *obj)
+{
+    DeviceState *dev = DEVICE(obj);
+	MBEDTimerInfo *s = MBED_TIMER(obj);
+	SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+
 	sysbus_init_irq(dev, &s->irq);
 	mbed_timer_reset(s);
+
 	// wrong For sending interrupts on match
 	 //qdev_init_gpio_out(&dev->qdev, &s->match_trigger, 1);
 	// TODO(gdrane): Add incoming interrupt for capture register
-	iomemtype = cpu_register_io_memory(timer_readfn,
-										timer_writefn, s,
-										DEVICE_NATIVE_ENDIAN);
-	sysbus_init_mmio(dev, 0x4000, iomemtype);
+
+	memory_region_init_io(&s->iomem, obj, &mbed_timer_ops, s,
+                          "mbed_timer", 0x4000);
+	sysbus_init_mmio(dev, &s->iomem);
 	s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, mbed_timer_tick, s);
 	return 0;
 }
@@ -2691,7 +2716,7 @@ static CPUWriteMemoryFunc * const mbed_gpio_writefn[] = {
 	mbed_gpio_write
 };
 
-static int mbed_gpio_init(SysBusDevice *dev)
+static int mbed_gpio_initfn(SysBusDevice *dev)
 {
 	MBEDGPIOInfo *s = MBED_GPIO(dev);
 	int iomemtype;
@@ -2709,24 +2734,25 @@ static int mbed_gpio_init(SysBusDevice *dev)
 /* Main Oscillator Of the MBED */
 // Main oscillator is like the vm_clock in case of qemu because it is the one that
 // provides all the timings to qemu
-QEMUClock* main_oscillator;
-bool main_oscillator_enabled = false;
+
+//QEMUClock* main_oscillator;
+//bool main_oscillator_enabled = false;
 
 static void enable_main_oscillator(void) 
 {
 	// Does nothing except gets a reference to the vm_clock maintained by
 	// qemu
-	if(!main_oscillator_enabled) 
-	{
-		main_oscillator = vm_clock;
-		main_oscillator_enabled = true;
-	}
+//	if(!main_oscillator_enabled) 
+//	{
+//		main_oscillator = vm_clock;
+//		main_oscillator_enabled = true;
+//	}
 }
 
 static void disable_main_oscillator(void) 
 {
-	main_oscillator = NULL;
-	main_oscillator_enabled = false;
+//	main_oscillator = NULL;
+//	main_oscillator_enabled = false;
 }
 
 static void change_oscillator_operating_range(int range) 
@@ -3122,8 +3148,8 @@ static int mbed_sys_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_mbed_sys = {
 	.name = "mbed_sys",
-	.version_id = 1,
-	.minimum_version_id = 1,
+	.version_id = 0,
+	.minimum_version_id = 0,
 	.post_load = mbed_sys_post_load,
 	.fields = (VMStateField[]) {
 		VMSTATE_UINT32(flashcfg, ssys_state), 
@@ -3219,8 +3245,8 @@ static void mbed_init(ram_addr_t ram_size,
 	qdev_prop_set_int32(dev, "lines", 128);
 	qdev_prop_set_ptr(dev, "intr_ref",(void*) s);
 	qdev_init_nofail(dev);
-	sysbus_mmio_map(sysbus_from_qdev(dev), 0, 0x2009c000);
-	sysbus_connect_irq(sysbus_from_qdev(dev), 0,
+	sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, 0x2009c000);
+	sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
 						cpu_pic[21]);
 	// UART - Serial Communication using MBED
 	// sysbus_create_simple("mbed-uart0", 0x4000c000, cpu_pic[5]);
@@ -3235,19 +3261,29 @@ static void mbed_init(ram_addr_t ram_size,
 	}
 }
 
-static SysBusDeviceInfo mbed_gpio_info = {
-	.init 		= mbed_gpio_init,
-	.qdev.name 	= "mbed-gpio",
-	.qdev.desc 	= "MBED GPIO Controller",
-	.qdev.size 	= sizeof(MBEDGPIOInfo),
-	.qdev.props = (Property []) {
+static void mbed_gpio_class_init(ObjectClass *klass, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->desc = "MBED GPIO Controller";
+	dc->size = sizeof(MBEDGPIOInfo);
+	dc->props = (Property []) {
 		DEFINE_PROP_INT32("lines", MBEDGPIOInfo, lines, 0),
 		DEFINE_PROP_PTR("intr_ref", MBEDGPIOInfo, intr_ref),
 		DEFINE_PROP_END_OF_LIST(),
-	}
+	};
+}
+
+static const TypeInfo mbed_gpio_info = {
+    .name          = TYPE_MBED_GPIO,
+    .parent        = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(MBEDGPIOInfo),
+    .instance_init = mbed_gpio_initfn,
+    .class_init    = mbed_gpio_class_init,
 };
 
 static void mbed_register_devices(void) {
+/*
 	sysbus_register_dev("mbed-timer0", sizeof(MBEDTimerInfo),
 						 mbed_timer_init);
 	sysbus_register_dev("mbed-timer1", sizeof(MBEDTimerInfo),
@@ -3257,6 +3293,7 @@ static void mbed_register_devices(void) {
 	sysbus_register_dev("mbed-timer3", sizeof(MBEDTimerInfo),
 						mbed_timer_init);
 	sysbus_register_withprop(&mbed_gpio_info);
+*/
 /*	sysbus_register_dev("mbed-uart0", sizeof(mbed_uart_state),
 						mbed_uart_init);
 	sysbus_register_dev("mbed-uart1", sizeof(mbed_uart_state),
@@ -3266,20 +3303,16 @@ static void mbed_register_devices(void) {
 	sysbus_register_dev("mbed-uart3", sizeof(mbed_uart_state),
 						mbed_uart_init);
 */
+	type_register_static(&mbed_gpio_info);
+	type_register_static(&mbed_timer_info);
 }
 
-device_init(mbed_register_devices);
+type_init(mbed_register_types);
 
-static QEMUMachine mbed_machine = {
-	.name = "mbed",
-	.desc = "MBED LPC 1768",
-	.init = mbed_init,
-};
-
-static void mbed_machine_init(void)
+static void mbed_machine_init(MachineClass *mc)
 {
-	qemu_register_machine(&mbed_machine);
+	mc->desc = "MBED LPC 1768";
+	mc->init = mbed_init;
 }
 
-machine_init(mbed_machine_init);
-
+DEFINE_MACHINE("mbed", mbed_machine_init);

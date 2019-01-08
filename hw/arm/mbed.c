@@ -1,23 +1,28 @@
-#include "sysbus.h"
-#include "arm-misc.h"
-#include "devices.h"
-#include "boards.h"
+#include "qemu/osdep.h"
+#include "hw/sysbus.h"
+#include "hw/arm/arm.h"
+#include "hw/devices.h"
+#include "hw/boards.h"
 #include "qemu-common.h"
-#include "qemu-timer.h"
-#include "qemu-char.h"
-#include "pc.h"
+#include "qemu/timer.h"
+#include "chardev/char.h"
+#include "hw/i386/pc.h"
 #include "hw/hw.h"
 #include "hw/irq.h"
 #include <sys/types.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
-#include "sysemu.h"
+#include "sysemu/sysemu.h"
 
 //-----defines-----
 #define PERIPHERAL_AREA_SIZE 0x3fff //16KB
 
 /* TIMER MODULE */
-typedef struct timer_state {
+#define TYPE_MBED_TIMER "mbed-timer"
+#define MBED_TIMER(obj) \
+    OBJECT_CHECK(MBEDTimerInfo, (obj), TYPE_MBED_TIMER)
+
+typedef struct MBEDTimerInfo {
 	SysBusDevice busdev;
 	uint32_t intr_reg;
 	uint32_t intr_mask;
@@ -34,20 +39,20 @@ typedef struct timer_state {
 	int64_t tick;
 	QEMUTimer *timer;
 	qemu_irq irq;
-}timer_state;
+}MBEDTimerInfo;
 
-static void timer_update_irq(timer_state *s)
+static void timer_update_irq(MBEDTimerInfo *s)
 {
 	//int level;
 	//level = (s->intr_reg & s->intr_mask) != 0;
 	qemu_set_irq(s->irq, 0);
 }
 
-static void timer_reload(timer_state* s, int reset)
+static void timer_reload(MBEDTimerInfo* s, int reset)
 {
 	int64_t tick;
 	//if(reset)
-		tick = qemu_get_clock_ns(vm_clock);
+		tick = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 	//else 
 	//	tick = s->tick;
 	if ((s->count_cntrl_reg & 0x3) == 0)
@@ -61,22 +66,22 @@ static void timer_reload(timer_state* s, int reset)
 			tick += (int64_t)count * 10;
 		}
 		s->tick = tick;
-		qemu_mod_timer(s->timer, tick);
+		timer_mod_ns(s->timer, tick);
 	} else {
 		hw_error("Counter Mode Not Supported\n");
 	}
 }
 
-static void timer_stop(timer_state *s)
+static void timer_stop(MBEDTimerInfo *s)
 {
 	if(!s->timer)
 		return;
-	qemu_del_timer(s->timer);
+	timer_del(s->timer);
 }
 
-static uint32_t timer_read(void *opaque, target_phys_addr_t offset)
+static uint32_t timer_read(void *opaque, uint64_t offset)
 {
-	timer_state *s = (timer_state*) opaque;
+	MBEDTimerInfo *s = (MBEDTimerInfo*) opaque;
 	switch (offset)
 	{
 		case 0x00:
@@ -116,9 +121,9 @@ static uint32_t timer_read(void *opaque, target_phys_addr_t offset)
 	return 0;
 }
 
-static void timer_write(void *opaque, target_phys_addr_t offset, uint32_t value)
+static void timer_write(void *opaque, uint64_t offset, uint32_t value)
 {
-	timer_state *s = (timer_state*)opaque;
+	MBEDTimerInfo *s = (MBEDTimerInfo*)opaque;
 	printf("\nTimer Write");
 	switch(offset)
 	{
@@ -216,7 +221,7 @@ static CPUWriteMemoryFunc * const timer_writefn[] = {
 static void mbed_timer_tick(void *opaque)
 {
 	//printf("One Clock Tick\n");
-	timer_state *s = (timer_state*) opaque;
+	MBEDTimerInfo *s = (MBEDTimerInfo*) opaque;
 	// Check if timer/counter is enabled
 	if (!(s->timer_cntrl_reg & 0x1)) {
 		printf("Counter not enabled:0x%x\n",s->timer_cntrl_reg);
@@ -305,7 +310,7 @@ static void mbed_timer_tick(void *opaque)
 	timer_update_irq(s);
 }
 
-static void mbed_timer_reset(timer_state *s)
+static void mbed_timer_reset(MBEDTimerInfo *s)
 {
 	s->intr_reg = 0;
 	s->intr_mask = 0;
@@ -329,7 +334,7 @@ static void mbed_timer_reset(timer_state *s)
 static int mbed_timer_init(SysBusDevice *dev)
 {
 	int iomemtype;
-	timer_state *s = FROM_SYSBUS(timer_state, dev);
+	MBEDTimerInfo *s = MBED_TIMER(dev);
 	sysbus_init_irq(dev, &s->irq);
 	mbed_timer_reset(s);
 	// wrong For sending interrupts on match
@@ -339,7 +344,7 @@ static int mbed_timer_init(SysBusDevice *dev)
 										timer_writefn, s,
 										DEVICE_NATIVE_ENDIAN);
 	sysbus_init_mmio(dev, 0x4000, iomemtype);
-	s->timer = qemu_new_timer_ns(vm_clock, mbed_timer_tick, s);
+	s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, mbed_timer_tick, s);
 	return 0;
 }
 
@@ -403,7 +408,7 @@ static void reset_tx_fifo(struct mbed_uart_state *s)
 	s->tx_count = 0;
 }
 
-static uint32_t mbed_uart_read(void *opaque, target_phys_addr_t offset)
+static uint32_t mbed_uart_read(void *opaque, uint64_t offset)
 {
 	struct mbed_uart_state *s = (struct mbed_uart_state *) opaque;
 
@@ -437,7 +442,7 @@ static uint32_t mbed_uart_read(void *opaque, target_phys_addr_t offset)
 	return 0;
 }
 
-static void mbed_uart_write(void *opaque, target_phys_addr_t offset, uint32_t value)
+static void mbed_uart_write(void *opaque, uint64_t offset, uint32_t value)
 {
 	struct mbed_uart_state *s = (struct mbed_uart_state*) opaque;
 
@@ -563,7 +568,7 @@ static void mbed_uart_init(SysBusDevice *dev)
 	return 0;
 }*/
 
-static void mbed_uart_init(target_phys_addr_t base, qemu_irq irq, CharDriverState* chr)
+static void mbed_uart_init(uint64_t base, qemu_irq irq, CharDriverState* chr)
 {
 	struct mbed_uart_state *s;
 	int iomemtype;
@@ -589,7 +594,7 @@ struct pin_connect_block {
 	uint32_t i2cpadcfg;
 };
 
-static uint32_t pin_connect_block_read(void* opaque, target_phys_addr_t offset)
+static uint32_t pin_connect_block_read(void* opaque, uint64_t offset)
 {
 	struct pin_connect_block *s = (struct pin_connect_block*)opaque;
 	switch(offset) {
@@ -643,7 +648,7 @@ static uint32_t pin_connect_block_read(void* opaque, target_phys_addr_t offset)
 	return 0;
 }
 
-static void pin_connect_block_write(void* opaque, target_phys_addr_t offset, uint32_t value)
+static void pin_connect_block_write(void* opaque, uint64_t offset, uint32_t value)
 {
 	struct pin_connect_block *s = (struct pin_connect_block*) opaque;
 	switch(offset) {
@@ -763,7 +768,11 @@ static void mbed_pin_connect_init(uint32_t base, qemu_irq irq)
 }
 
 /*----------GPIO--------------------*/
-struct gpio_state {
+#define TYPE_MBED_GPIO "mbed-gpio"
+#define MBED_GPIO(obj) \
+    OBJECT_CHECK(MBEDGPIOInfo, (obj), TYPE_MBED_GPIO)
+
+typedef struct MBEDGPIOInfo {
 	SysBusDevice busdev;
 	uint8_t fiodir[5][4];
 	uint8_t fiopin[5][4];
@@ -773,9 +782,9 @@ struct gpio_state {
 	void* intr_ref;
 	qemu_irq irq;
 	qemu_irq handler[64];
-};
+} MBEDGPIOInfo;
 
-struct gpio_interrupts {
+typedef struct MBEDGPIOInterrupts {
 	SysBusDevice busdev;
 	uint32_t iointstatus;
 	uint32_t iointenr[2];
@@ -783,14 +792,14 @@ struct gpio_interrupts {
 	uint32_t iointstatr[2];
 	uint32_t iointstatf[2];
 	uint32_t iointclr[2];	
-};
+} MBEDGPIOInterrupts;
 
-static void mbed_gpio_irq_update(struct gpio_state *s)
+static void mbed_gpio_irq_update(MBEDGPIOInfo *s)
 {
 	qemu_irq_raise(s->irq);
 }
 
-static void mbed_gpio_handler_update(struct gpio_state *s)
+static void mbed_gpio_handler_update(MBEDGPIOInfo *s)
 {
 	uint8_t diff;
 	int i, j;
@@ -820,9 +829,9 @@ static void mbed_gpio_handler_update(struct gpio_state *s)
 	}
 }
 
-static uint32_t mbed_gpio_read_halfw(void *opaque, target_phys_addr_t offset)
+static uint32_t mbed_gpio_read_halfw(void *opaque, uint64_t offset)
 {
-	struct gpio_state * s = (struct gpio_state*) opaque;
+	MBEDGPIOInfo * s = (MBEDGPIOInfo*) opaque;
 	switch(offset) {
 		case 0x00:
 			return s->fiodir[0][0] | ((uint16_t)s->fiodir[0][1] << 8);
@@ -927,9 +936,9 @@ static uint32_t mbed_gpio_read_halfw(void *opaque, target_phys_addr_t offset)
 	}
 	return 0;
 }
-static uint32_t mbed_gpio_read_byte(void *opaque, target_phys_addr_t offset) {
+static uint32_t mbed_gpio_read_byte(void *opaque, uint64_t offset) {
 
-	struct gpio_state *s = (struct gpio_state*) opaque;
+	MBEDGPIOInfo *s = (MBEDGPIOInfo*) opaque;
 	
 	switch(offset) {
 		case 0x00:
@@ -1136,9 +1145,9 @@ static uint32_t mbed_gpio_read_byte(void *opaque, target_phys_addr_t offset) {
 	return 0;
 }
 
-static uint32_t mbed_gpio_read(void *opaque, target_phys_addr_t offset)
+static uint32_t mbed_gpio_read(void *opaque, uint64_t offset)
 {
-	struct gpio_state *s = (struct gpio_state*) opaque;
+	MBEDGPIOInfo *s = (MBEDGPIOInfo*) opaque;
 	uint32_t temp;
 	uint8_t i;
 	printf("\nReading gpio\n");
@@ -1295,7 +1304,7 @@ static uint32_t mbed_gpio_read(void *opaque, target_phys_addr_t offset)
 	return 0;
 }
 
-static uint8_t chkmask(struct gpio_state* s, uint8_t port, uint8_t byteno, uint8_t isbyte, uint32_t value)
+static uint8_t chkmask(MBEDGPIOInfo* s, uint8_t port, uint8_t byteno, uint8_t isbyte, uint32_t value)
 {
 	if(isbyte == 1)
 	{
@@ -1317,7 +1326,7 @@ static uint8_t chkmask(struct gpio_state* s, uint8_t port, uint8_t byteno, uint8
 	return 1;
 }
 
-static uint8_t chkdir(struct gpio_state *s, uint8_t port, uint8_t byteno, uint8_t isbyte, uint32_t value)
+static uint8_t chkdir(MBEDGPIOInfo *s, uint8_t port, uint8_t byteno, uint8_t isbyte, uint32_t value)
 {
 	if(isbyte == 1)
 	{
@@ -1341,9 +1350,9 @@ static uint8_t chkdir(struct gpio_state *s, uint8_t port, uint8_t byteno, uint8_
 }
 
 
-static void mbed_gpio_write(void *opaque, target_phys_addr_t offset, uint32_t value)
+static void mbed_gpio_write(void *opaque, uint64_t offset, uint32_t value)
 {
-	struct gpio_state * s= (struct gpio_state*) opaque;
+	MBEDGPIOInfo * s= (MBEDGPIOInfo*) opaque;
 	int  i;
 	printf("\nWrite GPIO \n");
 	switch(offset)
@@ -1568,10 +1577,10 @@ static void mbed_gpio_write(void *opaque, target_phys_addr_t offset, uint32_t va
 	}
 }
 
-static void mbed_gpio_write_halfw(void * opaque, target_phys_addr_t offset, uint32_t value)
+static void mbed_gpio_write_halfw(void * opaque, uint64_t offset, uint32_t value)
 {
 	printf("Writing GPIO half word\n");
-	struct gpio_state *s = (struct gpio_state*) opaque;
+	MBEDGPIOInfo *s = (MBEDGPIOInfo*) opaque;
 	switch(offset)
 	{
 		case 0x00:
@@ -1969,8 +1978,8 @@ static void mbed_gpio_write_halfw(void * opaque, target_phys_addr_t offset, uint
 	}
 }
 
-static void mbed_gpio_write_byte(void* opaque, target_phys_addr_t offset, uint32_t value) {
-	struct gpio_state *s = (struct gpio_state*) opaque;
+static void mbed_gpio_write_byte(void* opaque, uint64_t offset, uint32_t value) {
+	MBEDGPIOInfo *s = (MBEDGPIOInfo*) opaque;
 	int i, j;
 	printf("Writing gpio byte\n");
 	// Just storing value them even if it does not change it's fine
@@ -2521,9 +2530,9 @@ static void mbed_gpio_write_byte(void* opaque, target_phys_addr_t offset, uint32
 	}
 }
 
-static uint32_t mbed_gpio_intr_read(void * opaque, target_phys_addr_t offset)
+static uint32_t mbed_gpio_intr_read(void * opaque, uint64_t offset)
 {
-	struct gpio_interrupts *s = (struct gpio_interrupts*)opaque;
+	struct MBEDGPIOInterrupts *s = (struct MBEDGPIOInterrupts*)opaque;
 	switch(offset) {
 		case 0x90:
 			return s->iointenr[0];
@@ -2555,9 +2564,9 @@ static uint32_t mbed_gpio_intr_read(void * opaque, target_phys_addr_t offset)
 }
 
 
-static void mbed_gpio_intr_write(void * opaque, target_phys_addr_t offset, uint32_t value)
+static void mbed_gpio_intr_write(void * opaque, uint64_t offset, uint32_t value)
 {
-	struct gpio_interrupts *s = (struct gpio_interrupts*) opaque;
+	struct MBEDGPIOInterrupts *s = (struct MBEDGPIOInterrupts*) opaque;
 	switch(offset) {
 		case 0x90:
 			s->iointenr[0] = value;
@@ -2595,7 +2604,7 @@ static void mbed_gpio_intr_write(void * opaque, target_phys_addr_t offset, uint3
 	}
 }
 
-static void mbed_gpio_reset(struct gpio_state *s) {
+static void mbed_gpio_reset(MBEDGPIOInfo *s) {
 	int i,j;
 	for(i = 0; i < 5; ++i) {
 		for(j = 0 ; j < 4; j++)
@@ -2610,8 +2619,8 @@ static void mbed_gpio_reset(struct gpio_state *s) {
 
 static void mbed_gpio_set(void * opaque, int line, int level)
 {
-	struct gpio_state *s = (struct gpio_state *) opaque;
-	struct gpio_interrupts *ptr = (struct gpio_interrupts *)ptr;
+	MBEDGPIOInfo *s = (MBEDGPIOInfo *) opaque;
+	struct MBEDGPIOInterrupts *ptr = (struct MBEDGPIOInterrupts *)ptr;
 	uint32_t portno, mask;
 	if(line < 32) {
 		portno = 0;
@@ -2650,7 +2659,7 @@ static void mbed_gpio_set(void * opaque, int line, int level)
 	}	
 }
 
-static void mbed_gpio_intr_reset(struct gpio_interrupts* s)
+static void mbed_gpio_intr_reset(struct MBEDGPIOInterrupts* s)
 {
 	s->iointenr[0] = s->iointenr[1] = s->iointenf[0] = s->iointenf[1] = 0;
 	s->iointstatr[0] = s->iointstatr[1] = s->iointstatf[0] = s->iointstatf[1] = 0;
@@ -2684,7 +2693,7 @@ static CPUWriteMemoryFunc * const mbed_gpio_writefn[] = {
 
 static int mbed_gpio_init(SysBusDevice *dev)
 {
-	struct gpio_state *s = FROM_SYSBUS(struct gpio_state, dev);
+	MBEDGPIOInfo *s = MBED_GPIO(dev);
 	int iomemtype;
 	qdev_init_gpio_in(&dev->qdev, mbed_gpio_set, s->lines);
 	qdev_init_gpio_out(&dev->qdev, s->handler, s->lines);
@@ -2773,7 +2782,7 @@ static void ssys_update(ssys_state *s)
 	qemu_set_irq(s->irq, (s->extint != 0));
 }
 
-static uint32_t ssys_read(void *opaque, target_phys_addr_t offset)
+static uint32_t ssys_read(void *opaque, uint64_t offset)
 {
 	ssys_state *s = (ssys_state *) opaque;
 	switch (offset) {
@@ -2827,7 +2836,7 @@ static uint32_t ssys_read(void *opaque, target_phys_addr_t offset)
 	}
 }
 
-static void ssys_write(void *opaque, target_phys_addr_t offset, uint32_t value)
+static void ssys_write(void *opaque, uint64_t offset, uint32_t value)
 {
 	ssys_state *s = (ssys_state *) opaque;
 	printf("Trying to write to memory\n");
@@ -3200,7 +3209,7 @@ static void mbed_init(ram_addr_t ram_size,
 	mbed_sys_init(0x400fc000, cpu_pic[SYS_CNTRL_INTRPT_NO]);
 	// Initializing GPIO's
 	// Creating space for interrupts
-	struct gpio_interrupts *s = (struct gpio_interrupts *)qemu_mallocz(sizeof(struct gpio_interrupts));
+	struct MBEDGPIOInterrupts *s = (struct MBEDGPIOInterrupts *)qemu_mallocz(sizeof(struct MBEDGPIOInterrupts));
 	int iomemtype = cpu_register_io_memory(mbed_gpio_intr_readfn,
 										   mbed_gpio_intr_writefn, s,
 										   DEVICE_NATIVE_ENDIAN);
@@ -3230,22 +3239,22 @@ static SysBusDeviceInfo mbed_gpio_info = {
 	.init 		= mbed_gpio_init,
 	.qdev.name 	= "mbed-gpio",
 	.qdev.desc 	= "MBED GPIO Controller",
-	.qdev.size 	= sizeof(struct gpio_state),
+	.qdev.size 	= sizeof(MBEDGPIOInfo),
 	.qdev.props = (Property []) {
-		DEFINE_PROP_INT32("lines", struct gpio_state, lines, 0),
-		DEFINE_PROP_PTR("intr_ref", struct gpio_state, intr_ref),
+		DEFINE_PROP_INT32("lines", MBEDGPIOInfo, lines, 0),
+		DEFINE_PROP_PTR("intr_ref", MBEDGPIOInfo, intr_ref),
 		DEFINE_PROP_END_OF_LIST(),
 	}
 };
 
 static void mbed_register_devices(void) {
-	sysbus_register_dev("mbed-timer0", sizeof(timer_state),
+	sysbus_register_dev("mbed-timer0", sizeof(MBEDTimerInfo),
 						 mbed_timer_init);
-	sysbus_register_dev("mbed-timer1", sizeof(timer_state),
+	sysbus_register_dev("mbed-timer1", sizeof(MBEDTimerInfo),
 						mbed_timer_init);
-	sysbus_register_dev("mbed-timer2", sizeof(timer_state),
+	sysbus_register_dev("mbed-timer2", sizeof(MBEDTimerInfo),
 						mbed_timer_init);
-	sysbus_register_dev("mbed-timer3", sizeof(timer_state),
+	sysbus_register_dev("mbed-timer3", sizeof(MBEDTimerInfo),
 						mbed_timer_init);
 	sysbus_register_withprop(&mbed_gpio_info);
 /*	sysbus_register_dev("mbed-uart0", sizeof(mbed_uart_state),

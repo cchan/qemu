@@ -1694,7 +1694,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
 
  buffer_overflow:
     tb = tb_alloc(pc);
-    printf("\ncurrent pc : %x\n", pc);
+    printf("\ncurrent pc : %lx\n", pc);
     if (unlikely(!tb)) {
         /* flush must be done */
         tb_flush(cpu);

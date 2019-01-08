@@ -4264,6 +4264,8 @@ int main(int argc, char **argv, char **envp)
             monitor_parse("vc:80Cx24C", "readline", false);
         if (default_virtcon)
             add_device_config(DEV_VIRTCON, "vc:80Cx24C");
+        // TODO(gdrane): Add new virtual device to the config which is capable
+        // of sending variability information to the guest.
     }
 
 #if defined(CONFIG_VNC)
